@@ -22,7 +22,6 @@ import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.player.RemotePlayer;
 import net.minecraft.client.renderer.OrderedSubmitNodeCollector;
-import net.minecraft.client.renderer.Sheets;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.block.MovingBlockRenderState;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
@@ -40,10 +39,11 @@ import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
-import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.renderer.texture.UvMapping;
 import net.minecraft.client.resources.model.EquipmentAssetManager;
 import net.minecraft.client.resources.model.EquipmentClientInfo;
-import net.minecraft.client.resources.model.geometry.BakedQuad;
+import net.minecraft.client.resources.model.geometry.ItemQuads;
+import net.minecraft.client.resources.palette.PalettedTextureManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -52,6 +52,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.util.Mth;
+import net.minecraft.util.Util;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityAttachment;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -62,6 +63,7 @@ import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.equipment.Equippable;
+import net.minecraft.world.item.equipment.trim.ArmorTrim;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -494,8 +496,11 @@ public final class FarPlayerRenderer {
                         Mth.lerp(partialTick, realPlayer.zOld, realPlayer.getZ()));
                 BlockPos realBlock = realPlayer.blockPosition();
                 // Vanilla draws no body there (F4) — this line's extraction gate, verbatim.
+                // 26.3: the gate takes the section fade-in window (BlockPos,long) now — vanilla's
+                // LevelExtractor passes Util.toMillis(chunkSectionFadeInTime); mirror that value.
                 if (!level.isOutsideBuildHeight(realBlock.getY())
-                        && !minecraft.levelRenderer.isSectionCompiledAndVisible(realBlock)) continue;
+                        && !minecraft.levelRenderer.isSectionCompiledAndVisible(realBlock,
+                                Util.toMillis(minecraft.options.chunkSectionFadeInTime().get()))) continue;
                 double cameraDistanceSq = cameraPosition.distanceToSqr(realPosition);
                 double range = realPlayer.getAttributeValue(Attributes.NAME_TAG_DISTANCE); // vanilla's own tag range (camera-based, as its cap is)
                 if (cameraDistanceSq < range * range) continue;
@@ -931,11 +936,23 @@ public final class FarPlayerRenderer {
         @Override
         public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
                                     int lightCoords, int overlayCoords, int tintedColor,
-                                    TextureAtlasSprite sprite, int outlineColor,
-                                    ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+                                    // 26.3: the sprite slot generalized to UvMapping (the trim palette
+                                    // handle rides there); the CrumblingOverlay moved to its own submit.
+                                    UvMapping uvMapping, int outlineColor) {
             int tier = model == skinModel ? -1 : tierOf(renderType);
             delegate.submitModel(model, state, lifted(poseStack, tier), renderType, lightCoords, overlayCoords,
-                    tintedColor, sprite, outlineColor, crumblingOverlay);
+                    tintedColor, uvMapping, outlineColor);
+        }
+
+        // 26.3: the crumbling overlay is its own submission now (26.2 carried it on submitModel's
+        // tail); forward it lifted with the same tier as the model it overlays.
+        @Override
+        public <S> void submitCrumblingOverlay(Model<? super S> model, S state, PoseStack poseStack,
+                                               RenderType renderType, int lightCoords, int overlayCoords,
+                                               int tintedColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+            int tier = model == skinModel ? -1 : tierOf(renderType);
+            delegate.submitCrumblingOverlay(model, state, lifted(poseStack, tier), renderType, lightCoords,
+                    overlayCoords, tintedColor, crumblingOverlay);
         }
 
         @Override
@@ -944,9 +961,10 @@ public final class FarPlayerRenderer {
             delegate.submitCustomGeometry(lifted(poseStack, tierOf(renderType)), renderType, customGeometryRenderer);
         }
 
+        // 26.3: item quads are an ItemQuads split (List<BakedQuad> is no longer accepted).
         @Override
         public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
-                               int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
+                               int overlayCoords, int outlineColor, int[] tintLayers, ItemQuads quads,
                                ItemStackRenderState.FoilType foilType) {
             delegate.submitItem(lifted(poseStack, 2), displayContext, lightCoords, overlayCoords, outlineColor,
                     tintLayers, quads, foilType);
@@ -957,7 +975,7 @@ public final class FarPlayerRenderer {
         // mesh so an FRAPI-enhanced held item keeps its geometry.
         @Override
         public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
-                               int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
+                               int overlayCoords, int outlineColor, int[] tintLayers, ItemQuads quads,
                                MeshView mesh, ItemStackRenderState.FoilType foilType) {
             delegate.submitItem(lifted(poseStack, 2), displayContext, lightCoords, overlayCoords, outlineColor,
                     tintLayers, quads, mesh, foilType);
@@ -979,15 +997,18 @@ public final class FarPlayerRenderer {
                     renderTypes, translucent, parts, mesh, tintLayers, lightCoords, overlayCoords, outlineColor);
         }
 
+        // 26.3: the vanilla breaking-block submit gained a trailing material flag (vanilla's
+        // LevelRenderer passes model.hasMaterialFlag(1)); forwarded unchanged, still unlifted.
         @Override
-        public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress) {
-            delegate.submitBreakingBlockModel(poseStack, parts, progress);
+        public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress,
+                                             boolean materialFlag) {
+            delegate.submitBreakingBlockModel(poseStack, parts, progress, materialFlag);
         }
 
         @Override
         public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, Mesh mesh,
-                                             int progress) {
-            delegate.submitBreakingBlockModel(poseStack, parts, mesh, progress);
+                                             int progress, boolean materialFlag) {
+            delegate.submitBreakingBlockModel(poseStack, parts, mesh, progress, materialFlag);
         }
 
         @Override
@@ -1007,6 +1028,14 @@ public final class FarPlayerRenderer {
                                int backgroundColor, int outlineColor) {
             delegate.submitText(poseStack, x, y, string, dropShadow, displayMode, lightCoords, color,
                     backgroundColor, outlineColor);
+        }
+
+        // 26.3: the text background is its own submit now (new abstract on the interface); the
+        // text lane is deliberately NOT lifted, so this forwards the pose untouched.
+        @Override
+        public void submitTextBackground(PoseStack poseStack, float x, float y, float width, float height,
+                                         int color, Font.DisplayMode displayMode, int outlineColor) {
+            delegate.submitTextBackground(poseStack, x, y, width, height, color, displayMode, outlineColor);
         }
 
         @Override
@@ -1148,7 +1177,8 @@ public final class FarPlayerRenderer {
         try {
             poseStack.translate(anchor.x - cameraPosition.x, anchor.y - cameraPosition.y,
                     anchor.z - cameraPosition.z);
-            poseStack.mulPose(cameraState.orientation);
+            // 26.3: PoseStack.mulPose(Quaternionf) is now rotate(Quaternionfc); same body (last().rotate(q)).
+            poseStack.rotate(cameraState.orientation);
             poseStack.scale(scale, -scale, scale);
             float x = -font.width(name) / 2.0f;
             int background = (int) (minecraft.options.getBackgroundOpacity(0.25f) * 255.0f) << 24;
@@ -1285,23 +1315,48 @@ public final class FarPlayerRenderer {
          *  layer type, each layer's texture through {@code getTextureLocation} (the
          *  {@code EquipmentLayerRenderer.layerTextureLookup} key with no player-texture
          *  override), then the memoized {@code armorCutoutNoCull} — never string-sniffed.
-         *  Rebuilt per apply from the equipment the wire just set; identity-keyed. */
+         *  Rebuilt per apply from the equipment the wire just set; identity-keyed.
+         *  <p>26.3: trims are no longer a fixed sheet — the trim render type is
+         *  {@code armorTrim(palettedTextureLocation, decal)}; the location is resolved the way
+         *  the armor layer's {@code TrimTextureKey} does it (pattern asset + material palette +
+         *  trim overrides through the paletted manager), because that key is package-private. */
         private void refreshLiftTiers(EquipmentAssetManager equipmentAssets) {
             liftTiers.clear();
-            liftTiers.put(Sheets.armorTrimsSheet(true), 1);
-            liftTiers.put(Sheets.armorTrimsSheet(false), 1);
-            liftTiers.put(RenderTypes.armorEntityGlint(), 1);
+            // 26.3: RenderTypes.armorEntityGlint() is now trimmedArmorGlint().
+            liftTiers.put(RenderTypes.trimmedArmorGlint(), 1);
             if (equipmentAssets == null) return;
+            PalettedTextureManager palettedTextures = Minecraft.getInstance().getPalettedTextureManager();
             for (EquipmentSlot slot : ARMOR_EQUIPMENT_SLOTS) {
-                Equippable equippable = this.getItemBySlot(slot).get(DataComponents.EQUIPPABLE);
+                ItemStack equipped = this.getItemBySlot(slot);
+                Equippable equippable = equipped.get(DataComponents.EQUIPPABLE);
                 // HumanoidArmorLayer.shouldRender: an asset id AND the matching slot.
                 if (equippable == null || equippable.slot() != slot || equippable.assetId().isEmpty()) continue;
                 boolean inner = slot == EquipmentSlot.LEGS;
                 EquipmentClientInfo.LayerType layerType = inner
                         ? EquipmentClientInfo.LayerType.HUMANOID_LEGGINGS : EquipmentClientInfo.LayerType.HUMANOID;
-                for (EquipmentClientInfo.Layer layer : equipmentAssets.get(equippable.assetId().get()).getLayers(layerType)) {
+                EquipmentClientInfo equipmentInfo = equipmentAssets.get(equippable.assetId().get());
+                for (EquipmentClientInfo.Layer layer : equipmentInfo.getLayers(layerType)) {
                     liftTiers.put(RenderTypes.armorCutoutNoCull(layer.getTextureLocation(layerType)), inner ? 0 : 1);
                 }
+                ArmorTrim trim = equipped.get(DataComponents.TRIM);
+                if (trim == null) continue;
+                // 26.3: TrimTextureKey.getOrPrepareTexture, mirrored — pattern asset + material
+                // palette, trim overrides applied, the layer prefix on the path, then the
+                // paletted manager (no-palette handles carry the derived path itself).
+                Identifier trimTexture = trim.pattern().value().assetId();
+                Identifier palette = trim.material().value().paletteId();
+                for (EquipmentClientInfo.TrimOverride override : equipmentInfo.trimOverrides()) {
+                    if (override.predicate().matches(trim)) {
+                        trimTexture = override.textureId().orElse(trimTexture);
+                        palette = override.paletteId().orElse(null);
+                        break;
+                    }
+                }
+                trimTexture = trimTexture.withPath(path -> layerType.trimAssetPrefix() + "/" + path);
+                Identifier trimLocation = palette == null
+                        ? trimTexture.withPath(path -> "textures/" + path + ".png")
+                        : palettedTextures.getOrPrepare(trimTexture, palette).textureLocation();
+                liftTiers.put(RenderTypes.armorTrim(trimLocation, trim.pattern().value().decal()), 1);
             }
         }
 

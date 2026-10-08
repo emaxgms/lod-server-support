@@ -217,7 +217,7 @@ public class ChunkDiskReader extends AbstractChunkDiskReader {
                     (CompletableFuture<Optional<NbtSectionSerializer.RawChunkRecord>> f) -> {
                         try {
                             var region = ((dev.vox.lss.mixin.AccessorRegionFileStorage) (Object) handles.storage())
-                                    .lss$getRegionFile(pos);
+                                    .lss$getOrCreateRegionFile(pos);
                             var record = RegionFileRawRead.read(region, pos);
                             // Count only PRESENT records (pre-D3 review L2-2): a
                             // not-found/corrupt fetch is no raw-path "serve", and on a

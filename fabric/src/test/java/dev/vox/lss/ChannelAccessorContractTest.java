@@ -225,7 +225,9 @@ class ChannelAccessorContractTest {
                 "AccessorRegionFile missing from lss.mixins.json");
 
         var storage = net.minecraft.world.level.chunk.storage.RegionFileStorage.class;
-        storage.getDeclaredMethod("getRegionFile", net.minecraft.world.level.ChunkPos.class);
+        // 26.3: getRegionFile(ChunkPos) became getRegionFile(ChunkPos, boolean create);
+        // the create-on-demand entry point the raw read needs is now getOrCreateRegionFile.
+        storage.getDeclaredMethod("getOrCreateRegionFile", net.minecraft.world.level.ChunkPos.class);
         var rf = net.minecraft.world.level.chunk.storage.RegionFile.class;
         rf.getDeclaredField("file");
         rf.getDeclaredField("SECTOR_BYTES");
