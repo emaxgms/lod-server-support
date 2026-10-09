@@ -383,6 +383,13 @@ final class NbtSectionSerializer {
             // unparseable and condemn a column it would have been dropped from anyway.
             if (sectionY < minSectionY || sectionY > maxSectionY) continue;
 
+            // A world carried forward from a pre-26.3 MC version still names the palette
+            // fields the old way; upgrade them on the tag itself before either path parses
+            // (see upgradeLegacyStateFields — the object path's container codec never routes
+            // a palette entry through our element codec, so this is the only seam that
+            // covers both).
+            upgradeLegacyStateFields(sectionTag);
+
             byte[] blockLightData = sectionTag.getByteArray("BlockLight").orElse(EMPTY);
             byte[] skyLightData = sectionTag.getByteArray("SkyLight").orElse(EMPTY);
             ParsedSection result;
@@ -874,6 +881,40 @@ final class NbtSectionSerializer {
         // Intrinsified vectorized mismatch — ~an order of magnitude over the byte loop.
         // Callers guarantee length == 2048.
         return !java.util.Arrays.equals(light, ZERO_NIBBLES);
+    }
+
+    /**
+     * 26.3 renamed the block-state NBT field names. Vanilla's own fixer for it
+     * ({@code BlockStateFieldNamesFix}) does exactly two renames — {@code Name} -> {@code id}
+     * and {@code Properties} -> {@code properties} — with no value conversion. This serve
+     * path reads RAW region NBT and deliberately never runs the DataFixer, so a world
+     * carried forward from an older MC version still has the legacy names on disk: every
+     * palette entry of every section then fails its decode, the lenient substitution
+     * replaces the entry with air IN PLACE (indices never shift) and the section is still
+     * served — a fabricated air column that overwrites the client's correct cached LOD,
+     * which reads in game as the terrain being erased.
+     *
+     * <p>Rewritten on the NBT itself, on the section's own palette list, BEFORE any codec
+     * sees it. That placement is load-bearing: the object path's container codec owns its
+     * own palette-entry shape, so wrapping the element codec alone never reaches it (tried;
+     * the decode still failed on the raw {@code {Name:...}} map). A plain-string entry (the
+     * 26.3 compact shape) and an already-26.3 compound are left untouched, so this is a
+     * no-op on a freshly written world. The tag is this read's private copy from the NBT
+     * loader, so rewriting it in place is local to the call.
+     */
+    private static void upgradeLegacyStateFields(CompoundTag sectionTag) {
+        var blockStates = sectionTag.getCompound("block_states").orElse(null);
+        if (blockStates == null) return;
+        var palette = blockStates.getList("palette").orElse(null);
+        if (palette == null) return;
+        for (int i = 0; i < palette.size(); i++) {
+            if (palette.get(i) instanceof CompoundTag entry && entry.contains("Name")) {
+                entry.put("id", entry.remove("Name"));
+                if (entry.contains("Properties")) {
+                    entry.put("properties", entry.remove("Properties"));
+                }
+            }
+        }
     }
 
     // Static (unlike factoryMemo): the block registry is bootstrap-frozen, so the memoized
